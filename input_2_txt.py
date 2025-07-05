@@ -10,18 +10,16 @@ REQUIREMENTS (tested on Windows)
 3. Inside your venv run:
 
    pip install -U yt-dlp
-   pip install git+https://github.com/openai/whisper.git@main
+   pip install faster_whisper
    # GPU users: install the matching CUDA wheel first, e.g.
    # pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 USER SETTINGS
 -------------
-Fill in the four variables below.  Leave OUTDIR empty ("") to default
+Fill in the variables below.  Leave OUTDIR empty ("") to default
 to the script’s own directory.
 """
 
-import contextlib
-import io
 import pathlib
 import re
 import sys
@@ -31,39 +29,20 @@ import subprocess
 from faster_whisper import WhisperModel
 import os
 import yt_dlp
+import numpy as np
 
 # ────────── USER SETTINGS ────────── #
-SOURCE   = r"C:\Users\arvin\Desktop\Therapeutic Medical Systems\V1_Modelling.mp4"  # r"URL_or_local_path"
+SOURCE   = r"https://www.youtube.com/watch?v=_ArVh3Cj9rw"  # r"URL_or_local_path"
 START_TS = "00:00:30"  # HH:MM:SS (empty → 00:00:00)
-END_TS   = "00:50:50"  # HH:MM:SS (empty → clip end)
+END_TS   = "00:03:50"  # HH:MM:SS (empty → clip end)
 OUTDIR   = r"output"   # "" → script folder
-MODEL = 'medium'  # True → use smaller Whisper model (faster, less accurate)
-COMP_TYPE = 'int8'  # 'int8', 'float16', 'float32' (default)
-
-# ─────────────────────────────────── #
+MODEL = 'base'  # use smaller Whisper model (faster, less accurate)
+COMP_TYPE = 'int8'  # 'int8', 'float16', 'int16', 'float32', 'int8_float32' .... (default)
+LANGUAGE = 'en'  # Specify language, e.g. 'en' for English.
 
 TS_RE = re.compile(r"^(\d\d):([0-5]\d):([0-5]\d)$")
-WHISPER_VERBOSE_RE = re.compile(
-    r"\[\d{2}:\d{2}(?::\d{2})?\.\d{3}\s*-->\s*\d{2}:\d{2}(?::\d{2})?\.\d{3}\]\s+(.*)"
-)
 
-# Allow SOURCE override via CLI
-if len(sys.argv) > 1:
-    SOURCE = sys.argv[1]
-    # only override if it matches HH:MM:SS
-    if len(sys.argv) > 2 and TS_RE.match(sys.argv[2]):
-        START_TS = sys.argv[2]
-
-    if len(sys.argv) > 3 and TS_RE.match(sys.argv[3]):
-        END_TS = sys.argv[3]
-
-    if len(sys.argv) > 4 and sys.argv[4] in ('tiny', 'base', 'small', 'medium'):
-        MODEL = sys.argv[4]
-                                             
-    if len(sys.argv) > 5 and sys.argv[5] in ('int8', 'int8_float32', 'int16','float32'):
-        COMP_TYPE = sys.argv[5]
-# ───────── helpers ───────── #
-
+# ───────────────── helpers ────────────────── #
 def ts_to_sec(ts: str) -> int:
     m = TS_RE.match(ts)
     if not m:
@@ -108,6 +87,25 @@ def extract_audio_local(src: pathlib.Path, start: str, end: str, dest_mp3: pathl
         raise RuntimeError('ffmpeg failed – see messages above.')
     print(f'✔ Clip saved to {dest_mp3}')
 
+def load_audio_from_mp3(mp3_path: pathlib.Path) -> np.ndarray:
+    """
+    Runs ffmpeg to decode mp3_path into a float32 PCM array
+    (16 kHz, mono). Returns a 1-D numpy array in [-1.0, +1.0].
+    """
+    cmd = [
+        'ffmpeg', '-v', 'error',
+        '-i', str(mp3_path),       # input
+        '-ac', '1',                # mono
+        '-ar', '16000',            # 16 kHz
+        '-f', 'f32le',             # raw float32 little-endian
+        'pipe:1'                   # → stdout
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    raw, _ = proc.communicate()
+    # Interpret as float32
+    audio = np.frombuffer(raw, dtype=np.float32)
+    return audio
+
 
 def get_local_duration(path: pathlib.Path) -> int | None:
     try:
@@ -121,24 +119,9 @@ def get_local_duration(path: pathlib.Path) -> int | None:
 
 
 
-class Tee:
-    """Duplicate stream to multiple outputs (e.g., file + stdout)."""
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-
-    def flush(self):
-        for s in self.streams:
-            s.flush()
-
-
 # ───────── yt‑dlp download ───────── #
 
 def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
-    """Invoke the classic yt‑dlp command that always worked, and ensure audio.mp3 appears."""
     print('[1/2] Downloading & extracting clip…')
 
     cmd = [
@@ -163,21 +146,32 @@ def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
 
 
 # ───────── Whisper transcription ───────── #
+
 def fmt_ts(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int(seconds % 3600 // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    """Formats seconds to HH:MM:SS."""
+    return sec_to_ts(int(seconds))
+
+def write_transcript(segments: list, file_path: pathlib.Path):
+    """Writes the transcript segments to a text file."""
+    # You could also format this as an SRT file, JSON, etc.
+    with open(file_path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            # Simple text output
+            start_ts = fmt_ts(seg['start'])
+            end_ts = fmt_ts(seg['end'])
+            f.write(f"[{start_ts} --> {end_ts}] {seg['text'].strip()}\n")
 
 
 def transcribe(mp3_path: pathlib.Path,
-                       txt_path: pathlib.Path,
-                       model_name: str,
-                       compute_type: str):
+               txt_path: pathlib.Path,
+               model_name: str,
+               compute_type: str):
+    """
+    Transcribes the audio using faster-whisper and handles interrupts gracefully.
+    """
     print('\n[2/2] Transcribing audio …')
     t0 = time.time()
-    
+
     try:
         import torch
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -190,49 +184,59 @@ def transcribe(mp3_path: pathlib.Path,
         model_name,
         device=device,
         compute_type=compute_type,
-        cpu_threads=os.cpu_count()
+        # Set to a number that works for your CPU, os.cpu_count() is a good default
+        cpu_threads=os.cpu_count() or 4
     )
 
-    captured    = io.StringIO()
-    status      = 'Unknown'
-    segments_out = []
+    completed_segments = []
+    status = 'Unknown'
+
+    audio = load_audio_from_mp3(mp3_path)
 
     try:
-        tee = Tee(sys.stdout, captured)
-        with contextlib.redirect_stdout(tee):
-            seg_gen, _ = model.transcribe(
-                str(mp3_path),
-                beam_size=1,        # greedy, fastest
-                vad_filter=True,    # skip silence
-                log_progress=True   # keeps the progress bar
-            )
+        # We set log_progress=True to see the progress bar in the console.
+        segments, _ = model.transcribe(
+            audio,
+            beam_size=1,        # greedy, fastest
+            vad_filter=True,    # skip silence
+            log_progress=True,
+            language=LANGUAGE  # specify language if known
+        )
 
-            # ─── mimic the old “verbose” stream ───
-            for seg in seg_gen:
-                print()
-                line = f"[{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}] {seg.text}"
-                print(line)
-                segments_out.append({'text': seg.text, 'start': seg.start, 'end': seg.end})
+        print("▶ Press Ctrl+C to interrupt and save partial progress.")
+        
+        # The magic happens here: we process the generator and store results as they come.
+        for segment in segments:
+            # Print to screen in real-time
+            print(f"\n[{fmt_ts(segment.start)} --> {fmt_ts(segment.end)}] {segment.text}")
+            
+            # Store the structured data
+            completed_segments.append({
+                'text': segment.text,
+                'start': segment.start,
+                'end': segment.end
+            })
 
         print('\n▶ Transcription complete – writing file…')
-        txt_path.write_text(
-            '\n'.join(s['text'].strip() for s in segments_out),
-            encoding='utf-8'
-        )
+        write_transcript(completed_segments, txt_path)
         status = 'Completed'
 
     except KeyboardInterrupt:
         print('\n▶ Keyboard interrupt – saving partial transcript…')
-        lines = WHISPER_VERBOSE_RE.findall(captured.getvalue())
-        partial = '\n'.join(lines) if lines else captured.getvalue()
-        txt_path.write_text(partial, encoding='utf-8')
-        status = 'Interrupted (Partial)'
+        # If interrupted, write whatever we have collected so far.
+        if completed_segments:
+            write_transcript(completed_segments, txt_path)
+            status = 'Interrupted (Partial)'
+        else:
+            print("  No segments were transcribed before interruption.")
+            status = 'Interrupted (No Data)'
         raise    # let main() know we bailed out
 
     finally:
         dt = time.time() - t0
         print(f"\n✔ Transcript ({status}) saved to: {txt_path}")
-        print(f"  Took {dt/60:.1f} min ({dt:.0f} s).")
+        if dt > 0:
+            print(f"  Took {dt/60:.1f} min ({dt:.0f} s).")
 
 
 # ──────────── main ──────────── #
