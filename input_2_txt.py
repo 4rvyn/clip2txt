@@ -28,16 +28,18 @@ import sys
 import time
 from datetime import datetime
 import subprocess
-import shutil
-
-import whisper
+from faster_whisper import WhisperModel
+import os
 import yt_dlp
 
 # ────────── USER SETTINGS ────────── #
-SOURCE   = r"https://www.youtube.com/watch?v=L45Q1_psDqk"  # r"URL_or_local_path"
-START_TS = "00:02:30"  # HH:MM:SS (empty → 00:00:00)
-END_TS   = "00:03:50"  # HH:MM:SS (empty → clip end)
+SOURCE   = r"C:\Users\arvin\Desktop\Therapeutic Medical Systems\V1_Modelling.mp4"  # r"URL_or_local_path"
+START_TS = "00:00:30"  # HH:MM:SS (empty → 00:00:00)
+END_TS   = "00:50:50"  # HH:MM:SS (empty → clip end)
 OUTDIR   = r"output"   # "" → script folder
+MODEL = 'medium'  # True → use smaller Whisper model (faster, less accurate)
+COMP_TYPE = 'int8'  # 'int8', 'float16', 'float32' (default)
+
 # ─────────────────────────────────── #
 
 TS_RE = re.compile(r"^(\d\d):([0-5]\d):([0-5]\d)$")
@@ -48,8 +50,18 @@ WHISPER_VERBOSE_RE = re.compile(
 # Allow SOURCE override via CLI
 if len(sys.argv) > 1:
     SOURCE = sys.argv[1]
+    # only override if it matches HH:MM:SS
+    if len(sys.argv) > 2 and TS_RE.match(sys.argv[2]):
+        START_TS = sys.argv[2]
 
+    if len(sys.argv) > 3 and TS_RE.match(sys.argv[3]):
+        END_TS = sys.argv[3]
 
+    if len(sys.argv) > 4 and sys.argv[4] in ('tiny', 'base', 'small', 'medium'):
+        MODEL = sys.argv[4]
+                                             
+    if len(sys.argv) > 5 and sys.argv[5] in ('int8', 'int8_float32', 'int16','float32'):
+        COMP_TYPE = sys.argv[5]
 # ───────── helpers ───────── #
 
 def ts_to_sec(ts: str) -> int:
@@ -83,7 +95,7 @@ def get_video_duration(url: str) -> int | None:
 
 def extract_audio_local(src: pathlib.Path, start: str, end: str, dest_mp3: pathlib.Path):
     """ffmpeg-trim any local mp3/mp4 to an MP3 clip."""
-    print('[1/2] Extracting local clip…')
+    print('[1/2] Extracting local clip… Please wait…')
     cmd = [
         'ffmpeg', '-v', 'error',  # keep ffmpeg quiet
         '-ss', start, *(['-to', end] if end else []),
@@ -123,25 +135,6 @@ class Tee:
             s.flush()
 
 
-class YtdlpLogger:
-    """Filter yt‑dlp log lines to match the original script’s vibe."""
-    def __init__(self):
-        self.extracting_announced = False
-
-    def _log(self, msg):
-        if msg.lstrip().startswith('[download]') and '%' in msg:
-            return  # hide progress spam
-        if 'Estimating duration from bitrate' in msg:
-            print('[info] Estimating duration…')
-            return
-        if msg.startswith('[ExtractAudio]') and not self.extracting_announced:
-            print('[info] Extracting…')
-            self.extracting_announced = True
-        print(msg)
-
-    debug = info = warning = error = _log
-
-
 # ───────── yt‑dlp download ───────── #
 
 def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
@@ -170,31 +163,62 @@ def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
 
 
 # ───────── Whisper transcription ───────── #
+def fmt_ts(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int(seconds % 3600 // 60)
+    s = int(seconds % 60)
+    ms = int((seconds - int(seconds)) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
-def transcribe(mp3_path: pathlib.Path, txt_path: pathlib.Path):
+
+def transcribe(mp3_path: pathlib.Path,
+                       txt_path: pathlib.Path,
+                       model_name: str,
+                       compute_type: str):
     print('\n[2/2] Transcribing audio …')
     t0 = time.time()
-    model_name = 'small'
-
+    
     try:
         import torch
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     except ImportError:
         device = 'cpu'
 
-    print(f'▶ Loading Whisper "{model_name}" on {device.upper()} …')
-    model = whisper.load_model(model_name, device=device)
+    print(f'▶ Loading Whisper "{model_name}" on {device.upper()} with {compute_type} …')
+    model = WhisperModel(
+        model_name,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=os.cpu_count()
+    )
 
-    captured = io.StringIO()
-    status = 'Unknown'
+    captured    = io.StringIO()
+    status      = 'Unknown'
+    segments_out = []
 
     try:
         tee = Tee(sys.stdout, captured)
         with contextlib.redirect_stdout(tee):
-            result = model.transcribe(str(mp3_path), verbose=True)
+            seg_gen, _ = model.transcribe(
+                str(mp3_path),
+                beam_size=1,        # greedy, fastest
+                vad_filter=True,    # skip silence
+                log_progress=True   # keeps the progress bar
+            )
+
+            # ─── mimic the old “verbose” stream ───
+            for seg in seg_gen:
+                print()
+                line = f"[{fmt_ts(seg.start)} --> {fmt_ts(seg.end)}] {seg.text}"
+                print(line)
+                segments_out.append({'text': seg.text, 'start': seg.start, 'end': seg.end})
 
         print('\n▶ Transcription complete – writing file…')
-        txt_path.write_text('\n'.join(seg['text'].strip() for seg in result['segments']), encoding='utf-8')
+        txt_path.write_text(
+            '\n'.join(s['text'].strip() for s in segments_out),
+            encoding='utf-8'
+        )
         status = 'Completed'
 
     except KeyboardInterrupt:
@@ -203,12 +227,12 @@ def transcribe(mp3_path: pathlib.Path, txt_path: pathlib.Path):
         partial = '\n'.join(lines) if lines else captured.getvalue()
         txt_path.write_text(partial, encoding='utf-8')
         status = 'Interrupted (Partial)'
-        raise  # re‑raise so main() knows the run was stopped
+        raise    # let main() know we bailed out
 
     finally:
         dt = time.time() - t0
         print(f"\n✔ Transcript ({status}) saved to: {txt_path}")
-        print(f"  Took {dt/60:.1f} min ({dt:.0f} s).")
+        print(f"  Took {dt/60:.1f} min ({dt:.0f} s).")
 
 
 # ──────────── main ──────────── #
@@ -254,7 +278,8 @@ def main():
             download_audio(SOURCE, start, end, mp3_path)
 
         # — Whisper transcription —
-        transcribe(mp3_path, txt_path)
+
+        transcribe(mp3_path, txt_path, MODEL, COMP_TYPE)
         print('\n--- SCRIPT FINISHED SUCCESSFULLY ---')
 
     except KeyboardInterrupt:
