@@ -27,18 +27,22 @@ import time
 from datetime import datetime
 import subprocess
 from faster_whisper import WhisperModel
+from faster_whisper import BatchedInferencePipeline
 import os
 import yt_dlp
 import numpy as np
+import multiprocessing as mp
+threads = str(mp.cpu_count())
+os.environ["OMP_NUM_THREADS"] = threads
+os.environ["MKL_NUM_THREADS"] = threads
 
 # ────────── USER SETTINGS ────────── #
-SOURCE   = r"https://www.youtube.com/watch?v=_ArVh3Cj9rw"  # r"URL_or_local_path"
-START_TS = "00:00:30"  # HH:MM:SS (empty → 00:00:00)
-END_TS   = "00:03:50"  # HH:MM:SS (empty → clip end)
+SOURCE   = r"https://www.youtube.com/watch?v=L45Q1_psDqk"  # r"URL_or_local_path"
+START_TS = ""  # HH:MM:SS (empty → 00:00:00)
+END_TS   = ""  # HH:MM:SS (empty → clip end)
 OUTDIR   = r"output"   # "" → script folder
-MODEL = 'base'  # use smaller Whisper model (faster, less accurate)
+MODEL = 'small.en'  # use smaller Whisper model (faster, less accurate) + ".en" for English
 COMP_TYPE = 'int8'  # 'int8', 'float16', 'int16', 'float32', 'int8_float32' .... (default)
-LANGUAGE = 'en'  # Specify language, e.g. 'en' for English.
 
 TS_RE = re.compile(r"^(\d\d):([0-5]\d):([0-5]\d)$")
 
@@ -188,6 +192,9 @@ def transcribe(mp3_path: pathlib.Path,
         cpu_threads=os.cpu_count() or 4
     )
 
+    pipe  = BatchedInferencePipeline(model=model)
+
+
     completed_segments = []
     status = 'Unknown'
 
@@ -195,12 +202,12 @@ def transcribe(mp3_path: pathlib.Path,
 
     try:
         # We set log_progress=True to see the progress bar in the console.
-        segments, _ = model.transcribe(
+        segments, _ = pipe.transcribe(
             audio,
-            beam_size=1,        # greedy, fastest
+            beam_size=2,        # greedy, fastest
             vad_filter=True,    # skip silence
             log_progress=True,
-            language=LANGUAGE  # specify language if known
+            batch_size=4,       # decode x# segments side-by-side
         )
 
         print("▶ Press Ctrl+C to interrupt and save partial progress.")
