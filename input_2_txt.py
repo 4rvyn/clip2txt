@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-link/local clip ► MP3 ► local Whisper transcript
+link/local clip + timestamps ► MP3/WAV pipeline ► local Whisper transcript
 ===========================================
 
 REQUIREMENTS (tested on Windows)
@@ -9,9 +9,8 @@ REQUIREMENTS (tested on Windows)
 2. ffmpeg.exe on PATH – https://www.gyan.dev/ffmpeg/builds/
 3. Inside your venv run:
 
-   pip install -U yt-dlp
-   pip install faster_whisper
-   # GPU users: install the matching CUDA wheel first, e.g.
+   pip install -r requirements.txt
+   # ONYL GPU users: install the matching CUDA wheel first, e.g.
    # pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 USER SETTINGS
@@ -32,17 +31,25 @@ import os
 import yt_dlp
 import numpy as np
 import multiprocessing as mp
+
 threads = str(mp.cpu_count())
 os.environ["OMP_NUM_THREADS"] = threads
 os.environ["MKL_NUM_THREADS"] = threads
 
 # ────────── USER SETTINGS ────────── #
-SOURCE   = r"https://www.youtube.com/watch?v=L45Q1_psDqk"  # r"URL_or_local_path"
+SOURCES  = [
+    r"https://www.youtube.com/watch?v=CPBJgpK0Ulc", # any URL or path to local file
+    # r"C:\path\to\local\video.mp4",  # local video
+    # r"C:\path\to\local\audio.mp3",  # local audio file
+]
+
+
 START_TS = ""  # HH:MM:SS (empty → 00:00:00)
 END_TS   = ""  # HH:MM:SS (empty → clip end)
 OUTDIR   = r"output"   # "" → script folder
-MODEL = 'small.en'  # use smaller Whisper model (faster, less accurate) + ".en" for English
-COMP_TYPE = 'int8'  # 'int8', 'float16', 'int16', 'float32', 'int8_float32' .... (default)
+MODEL = 'medium'  # use smaller Whisper model -> faster, less accurate) + ".en" for English etc.
+# Available models: tiny, base, small, medium, large-v1, large-v2
+COMP_TYPE = 'int8_float32'  # 'int8', 'float16', 'int16', 'float32', 'int8_float32' ...
 
 TS_RE = re.compile(r"^(\d\d):([0-5]\d):([0-5]\d)$")
 
@@ -54,18 +61,15 @@ def ts_to_sec(ts: str) -> int:
     h, m_, s = map(int, m.groups())
     return h * 3600 + m_ * 60 + s
 
-
 def sec_to_ts(sec: int) -> str:
     h, rem = divmod(sec, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-
 def ensure_outdir(path_hint: str) -> pathlib.Path:
     d = pathlib.Path(path_hint) if path_hint else pathlib.Path(__file__).parent
     d.mkdir(parents=True, exist_ok=True)
     return d.resolve()
-
 
 def get_video_duration(url: str) -> int | None:
     """Ask yt‑dlp (quietly) for duration in seconds."""
@@ -151,28 +155,26 @@ def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
 
 # ───────── Whisper transcription ───────── #
 
-def fmt_ts(seconds: float) -> str:
-    """Formats seconds to HH:MM:SS."""
-    return sec_to_ts(int(seconds))
-
-def write_transcript(segments: list, file_path: pathlib.Path):
+def write_transcript(segments: list, file_path: pathlib.Path, source: str, start: str, end: str):
     """Writes the transcript segments to a text file."""
     # You could also format this as an SRT file, JSON, etc.
     with open(file_path, "w", encoding="utf-8") as f:
+        f.write(f'Transcript of: "{source}"\n')
+        f.write(f"Full duration: [{start} --> {end}]\n\n")
         for seg in segments:
             # Simple text output
-            start_ts = fmt_ts(seg['start'])
-            end_ts = fmt_ts(seg['end'])
+            start_ts = sec_to_ts(int(seg['start']))
+            end_ts = sec_to_ts(int(seg['end']))
             f.write(f"[{start_ts} --> {end_ts}] {seg['text'].strip()}\n")
-
 
 def transcribe(mp3_path: pathlib.Path,
                txt_path: pathlib.Path,
                model_name: str,
-               compute_type: str):
-    """
-    Transcribes the audio using faster-whisper and handles interrupts gracefully.
-    """
+               compute_type: str,
+               source: str,
+               start: str,
+               end: str):
+    """Transcribes the audio using faster-whisper and handles interrupts gracefully."""
     print('\n[2/2] Transcribing audio …')
     t0 = time.time()
 
@@ -193,21 +195,20 @@ def transcribe(mp3_path: pathlib.Path,
     )
 
     pipe  = BatchedInferencePipeline(model=model)
-
-
     completed_segments = []
     status = 'Unknown'
-
     audio = load_audio_from_mp3(mp3_path)
 
     try:
         # We set log_progress=True to see the progress bar in the console.
         segments, _ = pipe.transcribe(
             audio,
-            beam_size=2,        # greedy, fastest
+            beam_size=3,        # greedy, 1 = fastest, 5 default
+            patience=1.2,       # 1.0 = default, 1.2 = more accurate
             vad_filter=True,    # skip silence
             log_progress=True,
-            batch_size=4,       # decode x# segments side-by-side
+            multilingual=True,
+            batch_size=8,       # decode x# segments in parallel (my cpu has 8 cores)
         )
 
         print("▶ Press Ctrl+C to interrupt and save partial progress.")
@@ -215,8 +216,8 @@ def transcribe(mp3_path: pathlib.Path,
         # The magic happens here: we process the generator and store results as they come.
         for segment in segments:
             # Print to screen in real-time
-            print(f"\n[{fmt_ts(segment.start)} --> {fmt_ts(segment.end)}] {segment.text}")
-            
+            print(f"\n[{sec_to_ts(int(segment.start))} --> {sec_to_ts(int(segment.end))}] {segment.text}")
+
             # Store the structured data
             completed_segments.append({
                 'text': segment.text,
@@ -225,14 +226,14 @@ def transcribe(mp3_path: pathlib.Path,
             })
 
         print('\n▶ Transcription complete – writing file…')
-        write_transcript(completed_segments, txt_path)
+        write_transcript(completed_segments, txt_path, source, start, end)
         status = 'Completed'
 
     except KeyboardInterrupt:
         print('\n▶ Keyboard interrupt – saving partial transcript…')
         # If interrupted, write whatever we have collected so far.
         if completed_segments:
-            write_transcript(completed_segments, txt_path)
+            write_transcript(completed_segments, txt_path, source, start, end)
             status = 'Interrupted (Partial)'
         else:
             print("  No segments were transcribed before interruption.")
@@ -290,7 +291,7 @@ def main():
 
         # — Whisper transcription —
 
-        transcribe(mp3_path, txt_path, MODEL, COMP_TYPE)
+        transcribe(mp3_path, txt_path, MODEL, COMP_TYPE, SOURCE, start, end)
         print('\n--- SCRIPT FINISHED SUCCESSFULLY ---')
 
     except KeyboardInterrupt:
@@ -302,6 +303,6 @@ def main():
         sys.exit(1)
 
 
-
 if __name__ == '__main__':
-    main()
+    for SOURCE in SOURCES:
+        main()
