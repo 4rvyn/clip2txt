@@ -1,20 +1,21 @@
 # link/local clip → MP3 → Whisper Transcript
 
-Extract a segment from a local file or URL to MP3 and generate a Whisper transcript.
+A customizable, all-in-one script to download and clip from a URL/local file and generate a timestamped transcript using faster-whisper. I will add proper command-line argument handling soon.
 
 **Requirements**
 
 * Python ≥ 3.11
 * ffmpeg on PATH
-* `pip install -U yt-dlp git+https://github.com/openai/whisper.git`
+* `pip install -r requirements.txt`
+* For GPU, install PyTorch with CUDA
 
 **Usage**
 
-1. Edit `SOURCE`, `START_TS`, `END_TS`, `OUTDIR` in `script.py` (or pass a link/file path as CLI arg).
-2. Run:
+1. Edit `SOURCE`, `START_TS`, `END_TS`, `OUTDIR` in `script.py` and run via IDE.
+2. OR Run:
 
    ```bash
-   python script.py [SOURCE]
+   python script.py "SOURCE_URL_OR_PATH"
    ```
 3. Find `audio.mp3` and `transcript.txt` in the output folder.
 
