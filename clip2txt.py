@@ -4,6 +4,7 @@ import sys
 import time
 from datetime import datetime
 import subprocess
+from dataclasses import dataclass
 from faster_whisper import WhisperModel
 from faster_whisper import BatchedInferencePipeline
 import os
@@ -213,7 +214,7 @@ def transcribe(mp3_path: pathlib.Path,
         else:
             print("  No segments were transcribed before interruption.")
             status = 'Interrupted (No Data)'
-        raise    # let main() know we bailed out
+        raise    # let run_job() know we bailed out
 
     finally:
         dt = time.time() - t0
@@ -222,39 +223,53 @@ def transcribe(mp3_path: pathlib.Path,
             print(f"  Took {dt/60:.1f} min ({dt:.0f} s).")
 
 
-# ──────────── main ──────────── #
-def main():
+# ──────────── Job-based execution ──────────── #
+
+@dataclass
+class Job:
+    source: str
+    start_ts: str
+    end_ts: str
+    outdir: str
+    model: str
+    compute: str
+
+def run_job(job: Job, idx: int | None = None) -> int:
+    """Run a single transcription job. Returns 0 on success, non-zero on failure."""
     print('--- SCRIPT START ---')
     try:
-        out_root = ensure_outdir(OUTDIR)
-        run_dir  = out_root / f"run_{datetime.now():%Y%m%d_%H%M%S}"
+        out_root = ensure_outdir(job.outdir)
+        # Ensure uniqueness when multiple jobs start within the same second
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{idx:03d}" if idx is not None else f"_{time.time_ns()%1_000_000:06d}"
+        run_dir  = out_root / f"run_{ts}{suffix}"
         run_dir.mkdir()
         print(f'▶ Output → {run_dir}')
 
         mp3_path = run_dir / 'audio.mp3'
         txt_path = run_dir / 'transcript.txt'
 
-        src_path = pathlib.Path(SOURCE).expanduser()
+        src_path = pathlib.Path(job.source).expanduser()
         is_local = src_path.is_file()
 
         # — determine duration & clip range —
         if is_local:
             dur = get_local_duration(src_path)
         else:
-            dur = get_video_duration(SOURCE)
+            dur = get_video_duration(job.source)
 
         if dur:
-            s_sec = ts_to_sec(START_TS) if START_TS else 0
-            e_sec = ts_to_sec(END_TS) if END_TS else dur
+            s_sec = ts_to_sec(job.start_ts) if job.start_ts else 0
+            e_sec = ts_to_sec(job.end_ts) if job.end_ts else dur
             if e_sec > dur:
                 e_sec = dur
             if s_sec >= e_sec:
                 s_sec, e_sec = 0, dur
             start, end = sec_to_ts(s_sec), sec_to_ts(e_sec)
         else:
-            if not START_TS or not END_TS:
+            if not job.start_ts or not job.end_ts:
                 raise ValueError('Unknown media length – specify both START_TS and END_TS.')
-            start, end = START_TS, END_TS
+            start, end = job.start_ts, job.end_ts
 
         print(f'▶ Clip range: {start} → {end}')
 
@@ -262,21 +277,41 @@ def main():
         if is_local:
             extract_audio_local(src_path.resolve(), start, end, mp3_path)
         else:
-            download_audio(SOURCE, start, end, mp3_path)
+            download_audio(job.source, start, end, mp3_path)
 
         # — Whisper transcription —
-        transcribe(mp3_path, txt_path, MODEL, COMP_TYPE, SOURCE, start, end)
+        transcribe(mp3_path, txt_path, job.model, job.compute, job.source, start, end)
         print('\n--- SCRIPT FINISHED SUCCESSFULLY ---')
+        return 0
 
     except KeyboardInterrupt:
         print('\n--- SCRIPT END (INTERRUPTED BY USER) ---')
-        sys.exit(0)
+        return 0
     except Exception as e:
         print('\n--- SCRIPT FAILED ---')
         print(e, file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+def main(jobs: list[Job]) -> int:
+    """Sequentially execute a list of jobs. Returns 0 if all succeed, else 1."""
+    any_failed = False
+    for i, job in enumerate(jobs, start=1):
+        rc = run_job(job, idx=i)
+        if rc != 0:
+            any_failed = True
+    return 1 if any_failed else 0
 
 
 if __name__ == '__main__':
-    for SOURCE in SOURCES:
-        main()
+    jobs = [
+        Job(
+            source=s,
+            start_ts=START_TS,
+            end_ts=END_TS,
+            outdir=OUTDIR,
+            model=MODEL,
+            compute=COMP_TYPE,
+        )
+        for s in SOURCES
+    ]
+    sys.exit(main(jobs))
