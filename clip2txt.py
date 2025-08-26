@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 import subprocess
 from dataclasses import dataclass
+import argparse
 from faster_whisper import WhisperModel
 from faster_whisper import BatchedInferencePipeline
 import os
@@ -104,7 +105,7 @@ def get_local_duration(path: pathlib.Path) -> int | None:
         return None
 
 
-# ───────── yt‑dlp download ───────── #
+# ───────── yt-dlp download ───────── #
 
 def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
     print('[1/2] Downloading & extracting clip…')
@@ -122,10 +123,10 @@ def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
     # inherit stdout/stderr → full logging visible (incl. keyboard buffer)
     run = subprocess.run(cmd)
     if run.returncode != 0:
-        raise RuntimeError('yt‑dlp failed – see messages above.')
+        raise RuntimeError('yt-dlp failed – see messages above.')
 
     if not dest_mp3.exists():
-        raise RuntimeError('yt‑dlp finished but audio.mp3 not found.')
+        raise RuntimeError('yt-dlp finished but audio.mp3 not found.')
 
     print(f'✔ Clip saved to {dest_mp3}')
 
@@ -302,16 +303,69 @@ def main(jobs: list[Job]) -> int:
     return 1 if any_failed else 0
 
 
+# ──────────── CLI ──────────── #
+
+def parse_cli_args():
+    p = argparse.ArgumentParser(
+        description="Download/trim audio from URLs or local files and transcribe with faster-whisper."
+    )
+    p.add_argument(
+        "sources",
+        nargs="*",
+        help="URLs or file paths to process. If omitted, uses SOURCES from the script.",
+    )
+    p.add_argument(
+        "--start",
+        dest="start_ts",
+        default=None,
+        help="Clip start timestamp HH:MM:SS. Overrides START_TS.",
+    )
+    p.add_argument(
+        "--end",
+        dest="end_ts",
+        default=None,
+        help="Clip end timestamp HH:MM:SS. Overrides END_TS.",
+    )
+    p.add_argument(
+        "-o", "--outdir",
+        dest="outdir",
+        default=None,
+        help="Output directory. Overrides OUTDIR.",
+    )
+    p.add_argument(
+        "-m", "--model",
+        dest="model",
+        default=None,
+        help="Whisper model name (tiny, base, small, medium, large-v1, large-v2, etc.). Overrides MODEL.",
+    )
+    p.add_argument(
+        "--compute-type",
+        dest="compute",
+        default=None,
+        help="Compute type for faster-whisper (e.g., int8, int8_float32, float16, float32). Overrides COMP_TYPE.",
+    )
+    return p.parse_args()
+
+
 if __name__ == '__main__':
+    args = parse_cli_args()
+
+    sources = args.sources if args.sources else SOURCES
+    start_ts = args.start_ts if args.start_ts is not None else START_TS
+    end_ts   = args.end_ts   if args.end_ts   is not None else END_TS
+    outdir   = args.outdir   if args.outdir   is not None else OUTDIR
+    model    = args.model    if args.model    is not None else MODEL
+    compute  = args.compute  if args.compute  is not None else COMP_TYPE
+
     jobs = [
         Job(
             source=s,
-            start_ts=START_TS,
-            end_ts=END_TS,
-            outdir=OUTDIR,
-            model=MODEL,
-            compute=COMP_TYPE,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            outdir=outdir,
+            model=model,
+            compute=compute,
         )
-        for s in SOURCES
+        for s in sources
     ]
     sys.exit(main(jobs))
