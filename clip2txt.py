@@ -1,24 +1,3 @@
-#!/usr/bin/env python3
-"""
-link/local clip + timestamps ► MP3/WAV pipeline ► local Whisper transcript
-===========================================
-
-REQUIREMENTS (tested on Windows)
-------------------------------------------
-1. Python ≥ 3.11
-2. ffmpeg.exe on PATH – https://www.gyan.dev/ffmpeg/builds/
-3. Inside your venv run:
-
-   pip install -r requirements.txt
-   # ONYL GPU users: install the matching CUDA wheel first, e.g.
-   # pip install torch --index-url https://download.pytorch.org/whl/cu121
-
-USER SETTINGS
--------------
-Fill in the variables below.  Leave OUTDIR empty ("") to default
-to the script’s own directory.
-"""
-
 import pathlib
 import re
 import sys
@@ -43,7 +22,6 @@ SOURCES  = [
     # r"C:\path\to\local\audio.mp3",  # local audio file
 ]
 
-
 START_TS = ""  # HH:MM:SS (empty → 00:00:00)
 END_TS   = ""  # HH:MM:SS (empty → clip end)
 OUTDIR   = r"output"   # "" → script folder
@@ -52,6 +30,7 @@ MODEL = 'medium'  # use smaller Whisper model -> faster, less accurate) + ".en" 
 COMP_TYPE = 'int8_float32'  # 'int8', 'float16', 'int16', 'float32', 'int8_float32' ...
 
 TS_RE = re.compile(r"^(\d\d):([0-5]\d):([0-5]\d)$")
+
 
 # ───────────────── helpers ────────────────── #
 def ts_to_sec(ts: str) -> int:
@@ -110,10 +89,8 @@ def load_audio_from_mp3(mp3_path: pathlib.Path) -> np.ndarray:
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     raw, _ = proc.communicate()
-    # Interpret as float32
     audio = np.frombuffer(raw, dtype=np.float32)
     return audio
-
 
 def get_local_duration(path: pathlib.Path) -> int | None:
     try:
@@ -124,7 +101,6 @@ def get_local_duration(path: pathlib.Path) -> int | None:
         return int(float(out.strip()))
     except Exception:
         return None
-
 
 
 # ───────── yt‑dlp download ───────── #
@@ -157,7 +133,6 @@ def download_audio(url: str, start: str, end: str, dest_mp3: pathlib.Path):
 
 def write_transcript(segments: list, file_path: pathlib.Path, source: str, start: str, end: str):
     """Writes the transcript segments to a text file."""
-    # You could also format this as an SRT file, JSON, etc.
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(f'Transcript of: "{source}"\n')
         f.write(f"Full duration: [{start} --> {end}]\n\n")
@@ -200,7 +175,7 @@ def transcribe(mp3_path: pathlib.Path,
     audio = load_audio_from_mp3(mp3_path)
 
     try:
-        # We set log_progress=True to see the progress bar in the console.
+        # set log_progress=True to see the progress bar in the console.
         segments, _ = pipe.transcribe(
             audio,
             beam_size=3,        # greedy, 1 = fastest, 5 default
@@ -213,7 +188,7 @@ def transcribe(mp3_path: pathlib.Path,
 
         print("▶ Press Ctrl+C to interrupt and save partial progress.")
         
-        # The magic happens here: we process the generator and store results as they come.
+        # process the generator and store results as they come.
         for segment in segments:
             # Print to screen in real-time
             print(f"\n[{sec_to_ts(int(segment.start))} --> {sec_to_ts(int(segment.end))}] {segment.text}")
@@ -290,7 +265,6 @@ def main():
             download_audio(SOURCE, start, end, mp3_path)
 
         # — Whisper transcription —
-
         transcribe(mp3_path, txt_path, MODEL, COMP_TYPE, SOURCE, start, end)
         print('\n--- SCRIPT FINISHED SUCCESSFULLY ---')
 
