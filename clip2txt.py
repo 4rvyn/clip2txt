@@ -156,9 +156,8 @@ def transcribe(mp3_path: pathlib.Path,
     t0 = time.time()
 
     try:
-        import torch
+        import torch  # type: ignore[import]
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
     except ImportError:
         device = 'cpu'
 
