@@ -2,11 +2,11 @@
 
 Download/clip audio from a URL or local file and generate a timestamped transcript with faster-whisper. Minimal, fast, and scriptable.
 
-* **URL or local input** — YouTube links or files on disk.
-* **Clip range** — `--start/--end` in `HH:MM:SS` (or use defaults in the script).
-* **Job-based runs** — each source → its own `run_YYYYMMDD_HHMMSS_xxx/`.
-* **GPU optional** — works on CPU; CUDA speeds things up if available.
-* **Straightforward outputs** — `audio.mp3` and `transcript.txt`.
+* **URL or local input:** YouTube links or files on disk.
+* **Clip range:** `--start/--end` in `HH:MM:SS` (or use defaults in the script).
+* **Job-based runs:** each source → its own `run_YYYYMMDD_HHMMSS_xxx/`.
+* **GPU optional:** works on CPU; CUDA speeds things up if available.
+* **Straightforward outputs:** `audio.mp3` and `transcript.txt`.
 
 <details>
 <summary><strong>Pipeline (diagram)</strong></summary>
